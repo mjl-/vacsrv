@@ -1,0 +1,46 @@
+# status
+
+experimental
+
+
+# intro
+
+vacsrv is a vac file system.  it is different from vacfs in the
+following ways:
+- serves the contents of a single vac score (never multiple)
+- handles multiple 9p2000 messages at a time
+- keeps a cache of venti blocks
+
+generally, it is meant to be faster than vacfs, usable as a root
+file system.
+
+
+# install
+
+make sure $ROOT is set.  now "mk install" to compile and install the
+files.
+
+when building from within inferno, insert SYSHOST=Inferno and ROOT=
+in the mk invocations to override the values in the mkconfig.
+
+
+# latest version
+
+the latest version can be found at:
+
+    http://www.ueber.net/code/r/vacsrv
+
+
+# licence & author
+
+all files are in the public domain.  this code has been written by
+mechiel lukkien, reachable at mechiel@ueber.net.
+
+
+# todo
+
+- handle 9p2000 messages concurrently, and venti messages too
+- implement block cache
+- think about implementing a cache for other data structures, e.g. name lookups in dirs, for walks
+- implement binary search when walking a name in a dir (metablock/metaentry)
+- think about adding a mode where vacsrv prefetches an entire hashtree (to get it into a venti's cache)

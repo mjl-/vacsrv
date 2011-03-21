@@ -1,0 +1,19 @@
+<../../mkconfig
+
+TARG=\
+	vacsrv.dis\
+
+SYSMODULES=\
+	arg.m\
+	draw.m\
+	keyring.m\
+	string.m\
+	styx.m\
+	sys.m\
+	tables.m\
+	venti.m\
+	vac.m\
+
+DISBIN=$ROOT/dis
+
+<$ROOT/mkfiles/mkdis

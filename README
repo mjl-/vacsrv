@@ -7,9 +7,9 @@ experimental
 
 vacsrv is a vac file system.  it is different from vacfs in the
 following ways:
-- serves the contents of a single vac score (never multiple)
 - handles multiple 9p2000 messages at a time
 - keeps a cache of venti blocks
+- only serves the contents of a single vac score (never multiple)
 
 generally, it is meant to be faster than vacfs, usable as a root
 file system.
@@ -39,8 +39,9 @@ mechiel lukkien, reachable at mechiel@ueber.net.
 
 # todo
 
-- handle 9p2000 messages concurrently, and venti messages too
-- implement block cache
-- think about implementing a cache for other data structures, e.g. name lookups in dirs, for walks
+- check again whether all 9p messages are implemented correctly.
 - implement binary search when walking a name in a dir (metablock/metaentry)
-- think about adding a mode where vacsrv prefetches an entire hashtree (to get it into a venti's cache)
+- handle qidspace
+- review behaviour of cache
+- speed up on slow connections by reading initial scores in parallel
+- write man page

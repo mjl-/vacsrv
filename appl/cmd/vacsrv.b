@@ -188,6 +188,9 @@ init(nil: ref Draw->Context, args: list of string)
 	}
 	say("have root entries");
 
+	spawn readentry(top[0]);
+	spawn readentry(top[1]);
+
 	rd := vread(top[2].score, venti->Datatype, 8*1024);
 	if(rd == nil)
 		fail(sprint("reading root entry: %r"));
@@ -212,6 +215,14 @@ init(nil: ref Draw->Context, args: list of string)
 		sys->pctl(sys->NEWNS, nil);
 	if(sys->mount(fds[1], nil, mtpt, Sys->MREPL, nil) < 0)
 		fail(sprint("mount: %r"));
+}
+
+readentry(e: ref Entry)
+{
+	nb := int ((e.size+big e.dsize-big 1)/big e.dsize);
+	t := Hashtree.mk(e);
+	for(i := 0; i < nb; i++) 
+		t.get(i);
 }
 
 R: adt {

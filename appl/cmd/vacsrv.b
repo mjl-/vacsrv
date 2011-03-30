@@ -662,8 +662,6 @@ if(dflag) say(sprint("t.get, b %d", b));
 		if(n > big t.e.dsize)
 			n = big t.e.dsize;
 		if(len r < int n) {
-			if(dt == venti->Dirtype)
-				return (nil, "zero truncation for Dirtype");
 			nr := array[int n] of {* => byte 0};
 			nr[:] = r;
 			r = nr;

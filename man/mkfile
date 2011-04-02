@@ -1,0 +1,6 @@
+<../mkconfig
+
+MAN=\
+	4/vacsrv\
+
+<mkman

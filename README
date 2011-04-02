@@ -43,5 +43,3 @@ mechiel lukkien, reachable at mechiel@ueber.net.
 - implement binary search when walking a name in a dir (metablock/metaentry)
 - handle qidspace
 - review behaviour of cache
-- speed up on slow connections by reading initial scores in parallel
-- write man page

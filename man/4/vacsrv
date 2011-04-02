@@ -1,0 +1,72 @@
+.TH VACSRV 4
+.SH NAME
+vacsrv \- vac venti archives file server
+.SH SYNOPSIS
+.B vacsrv
+[
+.B -dnpstV
+] [
+.B -a
+.I addr
+] [
+.B -m
+.I mtpt
+]
+.I score
+.SH DESCRIPTION
+.I Vacsrv
+serves the venti archive represented by vac root
+.I score
+over 9P2000.
+.PP
+Unlike
+.IR vacfs (4),
+.I vacsrv 
+handles multiple 9P2000 and venti requests concurrently,
+and keeps an internal cache of venti blocks and directory lookups.
+It is fast enough to serve as a root file system.
+.I Vacsrv
+is currently read-only.
+.PP
+Options:
+.TP
+.B -d
+Print debug info.
+.TP
+.B -n
+Before mounting, create a new empty namespace.
+Only useful in combination with
+.BR -m .
+.TP
+.B -p
+Print each score and its type requested from venti to the standard output.
+This is used by vacinits vacwalksrv to return a list of scores required for reading a list of files.
+.TP
+.B -s
+Print 9P2000 (styx) traces.
+.TP
+.B -t
+Print venti traces.
+.TP
+.B -V
+Do not verify data returned by the venti server.
+By default, data is verified to match the requested score.
+.TP
+.BI -a " addr"
+Use
+.I addr
+as the venti server, instead of the default ndb name
+.IR $venti .
+.TP
+.BI -m " mtpt"
+Mount on
+.IR mtpt .
+If not specified,
+.I vacsrv
+serves 9P2000 on its standard input.
+.SH SOURCE
+.B /appl/cmd/vacsrv.b
+.SH SEE ALSO
+.IR vacinit (1),
+.IR vacget (1),
+.IR vacfs (4)

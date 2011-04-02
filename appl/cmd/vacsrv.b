@@ -16,7 +16,7 @@ include "keyring.m";
 	kr: Keyring;
 include "tables.m";
 	tables: Tables;
-	Table: import tables;
+	Table, Strhash: import tables;
 include "venti.m";
 	venti: Venti;
 	Vmsg, Entry, Score, Session: import venti;
@@ -78,6 +78,7 @@ V: adt {
 	t:	ref Hashtree;	# data (entries for dir)
 	mt:	ref Hashtree;	# only for dir, metablocks with direntries
 	p:	ref V;		# parent
+	path:	string;
 
 	mk:	fn(d: ref Direntry, e, me: ref Entry, p: ref V): ref V;
 };
@@ -138,6 +139,7 @@ init(nil: ref Draw->Context, args: list of string)
 		fail(sprint("bad score: %r"));
 
 	zeroscore = Score.zero();
+	lookinit();
 
 	addr = dial->netmkaddr(addr, "net", "venti");
 	cc := dial->dial(addr, nil);
@@ -412,6 +414,8 @@ main(sfd: ref Sys->FD)
 				if(m.fid != m.newfid)
 					fids.add(m.newfid, nf);
 				src <-= ref Rmsg.Walk(m.tag, array[0] of sys->Qid);
+			} else if(badname(m.names)) {
+				src <-= ref Rmsg.Error(m.tag, "bad name");
 			} else {
 				w := ref W(0, m.newfid, nil, tm, nil, nil);
 				tags.add(m.tag, w);
@@ -504,6 +508,22 @@ is9p2000(s: string): int
 	return 0;
 }
 
+slash(s: string): int
+{
+	for(i := 0; i < len s; i++)
+		if(s[i] == '/')
+			return 1;
+	return 0;
+}
+
+badname(n: array of string): int
+{
+	for(i := 0; i < len n; i++)
+		if((e := n[i]) == "." || slash(e))
+			return 1;
+	return 0;
+}
+
 twalk(w: ref W, m: ref Tmsg.Walk, f: ref Fid, rc: chan of ref W)
 {
 	qids := array[len m.names] of sys->Qid;
@@ -554,7 +574,11 @@ V.mk(d: ref Direntry, e, me: ref Entry, p: ref V): ref V
 {
 	if(me != nil)
 		mt := Hashtree.mk(me);
-	return ref V(d, Hashtree.mk(e), mt, p);
+	if(p == nil)
+		path := "";
+	else
+		path = p.path+"/"+d.elem;
+	return ref V(d, Hashtree.mk(e), mt, p, path);
 }
 
 nocache := C(-2, Score(nil), nil);
@@ -689,6 +713,91 @@ if(dflag) warn(sprint("getentr, i %d", i));
 	return (ne, nil);
 }
 
+# we keep Nlookup paths in the cache for lookup.
+# by keeping V alive, we keep the blocks in its hashtree(s) cached too.
+# least recently used eviction scheme.
+# lookfirst is lru, looklast is mru.
+Nlookup: con 64;
+E: adt {
+	v:	ref V;
+	prev,
+	next:	cyclic ref E;
+};
+lookfirst,
+looklast: ref E;
+lookpaths: ref Strhash[ref E];
+lookuplock: chan of int;
+
+lookinit()
+{
+	lookpaths = Strhash[ref E].new(31, nil);
+
+	lookuplock = chan[1] of int;
+	lookuplock <-= 1;
+
+	ee := array[Nlookup] of {* => ref E};
+	for(i := 0; i < len ee; i++) {
+		if(i-1 >= 0)
+			ee[i].prev = ee[i-1];
+		if(i+1 < len ee)
+			ee[i].next = ee[i+1];
+	}
+	lookfirst = ee[0];
+	looklast = ee[len ee-1];
+}
+
+looktake(e: ref E)
+{
+	if(e == lookfirst)
+		lookfirst = lookfirst.next;
+	else if(e == looklast)
+		looklast = looklast.prev;
+	else {
+		e.prev.next = e.next;
+		e.next.prev = e.prev;
+	}
+	lookfirst.prev = looklast.next = nil;
+	e.prev = e.next = nil;
+}
+
+lookup(path: string): (int, ref V)
+{
+	<-lookuplock;
+	(ok, nv) := lookup0(path);
+	lookuplock <-= 1;
+	return (ok, nv);
+}
+
+lookup0(path: string): (int, ref V)
+{
+	e := lookpaths.find(path);
+	if(e == nil)
+		return (0, nil);
+	looktake(e);
+	e.prev = looklast;
+	looklast = looklast.next = e;
+	return (1, e.v);
+}
+
+lookput(v: ref V)
+{
+	<-lookuplock;
+	lookput0(v);
+	lookuplock <-= 1;
+}
+
+lookput0(v: ref V)
+{
+	e := lookfirst;
+	looktake(lookfirst);
+	if(e.v != nil)
+		lookpaths.del(e.v.path);
+	e.v = v;
+	lookpaths.add(e.v.path, e);
+	e.prev = looklast;
+	looklast = looklast.next = e;
+}
+
 walk(v: ref V, name: string): (ref V, string)
 {
 	if(name == "..") {
@@ -696,7 +805,15 @@ walk(v: ref V, name: string): (ref V, string)
 			v = v.p;
 		return (v, nil);
 	}
-	(nv, err) := lwalk(v, name);
+
+	(hit, nv) := lookup(v.path+"/"+name);
+	if(hit)
+		return (nv, nil);
+
+	err: string;
+	(nv, err) = lwalk(v, name);
+	if(nv != nil)
+		lookput(nv);
 	if(nv == nil && err == nil)
 		err = Enotfound;
 	return (nv, err);

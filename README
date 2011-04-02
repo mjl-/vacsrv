@@ -40,5 +40,4 @@ mechiel lukkien, reachable at mechiel@ueber.net.
 # todo
 
 - implement binary search when walking a name in a dir (metablock/metaentry)
-- review behaviour of cache
 - handle qidspace

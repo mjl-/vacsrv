@@ -72,28 +72,12 @@ D: adt {
 };
 
 
-# cache entry for name in a dir.  if v is nil, name does not exist.
-DC: adt {
-	name:	string;
-	v:	ref V;
-};
-Ndcache: con 16;
-
 # everything vac about a file
 V: adt {
-	# open count, only kept for non-dirs.
-	nopenlock:	chan of int;
-	nopen:	int;
-
 	d:	ref Direntry;
 	t:	ref Hashtree;	# data (entries for dir)
 	mt:	ref Hashtree;	# only for dir, metablocks with direntries
 	p:	ref V;		# parent
-
-	# for dirs
-	lookuplock:	chan of int;
-	nc:	int;
-	cfirst:	cyclic ref Link[ref DC];
 
 	mk:	fn(d: ref Direntry, e, me: ref Entry, p: ref V): ref V;
 };
@@ -113,7 +97,6 @@ Hashtree: adt {
 
 	mk:	fn(e: ref Entry): ref Hashtree;
 	get:	fn(t: self ref Hashtree, b: int): (array of byte, string);
-	clear:	fn(t: self ref Hashtree);
 };
 
 init(nil: ref Draw->Context, args: list of string)
@@ -426,7 +409,8 @@ main(sfd: ref Sys->FD)
 				src <-= ref Rmsg.Error(m.tag, Efidopen);
 			else if(len m.names == 0) {
 				nf := ref Fid(0, nil, f.v);
-				fids.add(m.newfid, nf);
+				if(m.fid != m.newfid)
+					fids.add(m.newfid, nf);
 				src <-= ref Rmsg.Walk(m.tag, array[0] of sys->Qid);
 			} else {
 				w := ref W(0, m.newfid, nil, tm, nil, nil);
@@ -444,11 +428,6 @@ main(sfd: ref Sys->FD)
 				src <-= ref Rmsg.Error(m.tag, Efidopen);
 			else {
 				f.open++;
-				if((f.v.d.emode&sys->DMDIR) == 0) {
-					<-f.v.nopenlock;
-					f.v.nopen++;
-					f.v.nopenlock <-= 1;
-				}
 				src <-= ref Rmsg.Open(m.tag, qid(f.v.d), msize-24);
 			}
 		Read =>
@@ -472,13 +451,6 @@ main(sfd: ref Sys->FD)
 			if(f == nil) {
 				src <-= ref Rmsg.Error(m.tag, Ebadfid);
 				continue;
-			}
-
-			if(f.open && (f.v.d.emode&sys->DMDIR) == 0) {
-				<-f.v.nopenlock;
-				if(--f.v.nopen == 0)
-					f.v.t.clear();
-				f.v.nopenlock <-= 1;
 			}
 
 			if(tagof m == tagof Tmsg.Clunk)
@@ -580,13 +552,9 @@ tread(w: ref W, m: ref Tmsg.Read, f: ref Fid, off: big, n: int, rc: chan of ref 
 
 V.mk(d: ref Direntry, e, me: ref Entry, p: ref V): ref V
 {
-	nopenlock := chan[1] of int;
-	nopenlock <-= 1;
-	lookuplock := chan[1] of int;
-	lookuplock <-= 1;
 	if(me != nil)
 		mt := Hashtree.mk(me);
-	return ref V(nopenlock, 0, d, Hashtree.mk(e), mt, p, lookuplock, 0, nil);
+	return ref V(d, Hashtree.mk(e), mt, p);
 }
 
 nocache := C(-2, Score(nil), nil);
@@ -688,13 +656,6 @@ if(dflag) warn(sprint("t.get, b %d", b));
 	return (r, nil);
 }
 
-Hashtree.clear(t: self ref Hashtree)
-{
-	<-t.cachelock;
-	t.cache = array[t.e.depth+1] of {* => (nocache, nocache)};
-	t.cachelock <-= 1;
-}
-
 vread(s: Score, t, nmax: int): array of byte
 {
 	if(zeroscore.eq(s))
@@ -728,15 +689,6 @@ if(dflag) warn(sprint("getentr, i %d", i));
 	return (ne, nil);
 }
 
-# called under lookuplock
-vcacheput(v: ref V, name: string, cv: ref V)
-{
-	for(; v.nc >= Ndcache; v.nc--)
-		v.cfirst = v.cfirst.next;
-	v.cfirst = ref Link[ref DC](ref DC(name, cv), v.cfirst);
-	v.nc++;
-}
-
 walk(v: ref V, name: string): (ref V, string)
 {
 	if(name == "..") {
@@ -744,36 +696,7 @@ walk(v: ref V, name: string): (ref V, string)
 			v = v.p;
 		return (v, nil);
 	}
-
-	<-v.lookuplock;
-
-	nv: ref V;
-	err: string;
-	hit := 0;
-	prev: ref Link[ref DC];
-	for(c := v.cfirst; c != nil; c = c.next) {
-		if(c.e.name == name) {
-			if(prev != nil) {
-				# not at head yet, move it there
-				prev.next = c.next;
-				v.cfirst = ref Link[ref DC](c.e, v.cfirst);
-			}
-			nv = c.e.v;
-			hit = 1;
-#warn(sprint("walk hit, name %q", name));
-			break;
-		}
-		prev = c;
-	}
-	if(!hit) {
-		(nv, err) = lwalk(v, name);
-		if(err == nil)
-			vcacheput(v, name, nv);
-#warn(sprint("walk miss, putting %q, nv nil %d", name, nv==nil));
-	}
-
-	v.lookuplock <-= 1;
-
+	(nv, err) := lwalk(v, name);
 	if(nv == nil && err == nil)
 		err = Enotfound;
 	return (nv, err);

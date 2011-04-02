@@ -35,15 +35,14 @@ pflag: int;
 sflag: int;
 tflag: int;
 Vflag: int;
+mtpt: string;
 
 RC: type chan of (array of byte, string);
 vreqc: chan of (int, Score, int, RC);
 
 zeroscore: Score;
-top: array of ref Entry;
-root: ref Direntry;
+root: ref V;
 msize: int;
-mtpt: string;
 
 Enowrite:	con "no writes allowed";
 Ebadfid:	con "bad fid";
@@ -63,7 +62,7 @@ Fid: adt {
 
 # directory open for reading
 D: adt {
-	lock:	chan of int;
+	dirlock:	chan of int;
 	off:	big;
 	i:	int;
 	b:	int;
@@ -82,25 +81,26 @@ Ndcache: con 16;
 
 # everything vac about a file
 V: adt {
-	# open count, only for non-dirs
-	nlock:	chan of int;
+	# open count, only kept for non-dirs.
+	nopenlock:	chan of int;
 	nopen:	int;
 
 	d:	ref Direntry;
-	t:	ref Hashtree;
-	mt:	ref Hashtree;
-	p:	ref V;
+	t:	ref Hashtree;	# data (entries for dir)
+	mt:	ref Hashtree;	# only for dir, metablocks with direntries
+	p:	ref V;		# parent
 
 	# for dirs
-	dlock:	chan of int;
+	lookuplock:	chan of int;
 	nc:	int;
 	cfirst:	cyclic ref Link[ref DC];
 
 	mk:	fn(d: ref Direntry, e, me: ref Entry, p: ref V): ref V;
 };
 
+# venti block cache entry
 C: adt {
-	b:	int;
+	b:	int;		# block number, used if >= 0 (only for non-ptr blocks)
 	s:	Score;
 	d:	array of byte;
 };
@@ -108,7 +108,7 @@ C: adt {
 Hashtree: adt {
 	e:	ref Entry;
 
-	lock:	chan of int;
+	cachelock:	chan of int;
 	cache:	array of (C, C);  # .t0 is most recently used, indexed by depth
 
 	mk:	fn(e: ref Entry): ref Hashtree;
@@ -174,19 +174,19 @@ init(nil: ref Draw->Context, args: list of string)
 	r := venti->unpackroot(dr);
 	if(r == nil)
 		fail(sprint("parsing root score: %r"));
-	say("have root");
+	if(dflag) warn("have root");
 
 	td := vread(r.score, venti->Dirtype, 3*venti->Entrysize);
 	if(td == nil)
 		fail(sprint("reading root directory: %r"));
-	top = array[3] of ref Entry;
+	top := array[3] of ref Entry;
 	for(i := 0; i < len top; i++) {
 		e := venti->unpackentry(td[i*venti->Entrysize:(i+1)*venti->Entrysize]);
 		if(e == nil)
 			fail(sprint("root dir entry: %r"));
 		top[i] = e;
 	}
-	say("have root entries");
+	if(dflag) warn("have root entries");
 
 	spawn readentry(top[0]);
 	spawn readentry(top[1]);
@@ -200,10 +200,11 @@ init(nil: ref Draw->Context, args: list of string)
 	rme := Metaentry.unpack(rd, 0);
 	if(rme == nil)
 		fail(sprint("parsing root metaentry: %r"));
-	root = Direntry.unpack(rd[rme.offset:rme.offset+rme.size]);
-	if(root == nil)
+	rootde := Direntry.unpack(rd[rme.offset:rme.offset+rme.size]);
+	if(rootde == nil)
 		fail(sprint("parsing root direntry: %r"));
-	say("have root entry");
+	root = V.mk(rootde, top[0], top[1], nil);
+	if(dflag) warn("have root entry");
 
 	if(mtpt == nil)
 		return main(sys->fildes(0));
@@ -228,7 +229,7 @@ readentry(e: ref Entry)
 R: adt {
 	t:	int;
 	s:	Score;
-	n:	int;
+	nmax:	int;
 	rc:	RC;
 };
 
@@ -239,13 +240,13 @@ Link: adt[T] {
 
 ventisrv(fd: ref Sys->FD)
 {
-	tmc := chan[1] of ref Vmsg;
+	tmc := chan[256] of ref Vmsg;
 	rmc := chan[1] of ref Vmsg;
 	errc := chan of string;
 	spawn vreader(fd, rmc, errc);
 	spawn vwriter(fd, tmc, errc);
 
-	tidtab := Table[ref R].new(31, nil);
+	tidtab := Table[ref R].new(13, nil);
 
 	first,
 	last: ref Link[ref R];
@@ -284,7 +285,7 @@ ventisrv(fd: ref Sys->FD)
 			first = first.next;
 			if(first == nil)
 				last = nil;
-			tmc <-= ref Vmsg.Tread(1, tid, r.s, r.t, r.n);
+			tmc <-= ref Vmsg.Tread(1, tid, r.s, r.t, r.nmax);
 		}
 
 	(t, s, n, rc) := <-vreqc =>
@@ -334,10 +335,11 @@ vwriter(fd: ref Sys->FD, c: chan of ref Vmsg, errc: chan of string)
 	}
 }
 
+# work
 W: adt {
 	flushed: 	int;
-	newfid:		int;
-	nf:		ref Fid;
+	newfid:		int;		# valid if >= 0
+	nf:		ref Fid;	# may be nil, even with newfid >= 0
 	m:		ref Tmsg;
 	rm:		ref Rmsg;
 	err:		string;
@@ -345,30 +347,12 @@ W: adt {
 
 main(sfd: ref Sys->FD)
 {
-	mm := Tmsg.read(sfd, 128);
-	if(mm == nil)
-		fail(sprint("reading Tversion: %r"));
-	if(sflag) warn("9 <- "+mm.text());
-	pick m := mm {
-	Readerror =>
-		fail("reading Tversion: "+m.error);
-	* =>
-		fail("first 9P2000 message from client not Tversion");
-	Version =>
-		rm := ref Rmsg.Version(m.tag, m.msize, "unknown");
-		(v, nil) := str->splitstrl(m.version, ".");
-		if(v == "9P2000")
-			rm.version = v;
-		if(sflag) warn("9 -> "+rm.text());
-		if(sys->write(sfd, d := rm.pack(), len d) != len d)
-			fail(sprint("write 9P2000 Rversion: %r"));
-		msize = m.msize;
-	}
-
 	stc := chan[1] of ref Tmsg;
 	src := chan[1] of ref Rmsg;
 	serrc := chan of string;
 
+	msize = 8*1024;
+	okversion := 0;
 	spawn styxread(sfd, stc, serrc);
 	spawn styxwrite(sfd, src, serrc);
 
@@ -387,26 +371,35 @@ main(sfd: ref Sys->FD)
 		fail("styx: "+e);
 
 	tm := <-stc =>
+		if(!okversion)
+			pick m := tm {
+			Readerror =>	{}
+			Version =>	{}
+			* =>
+				fail("9p message while no 9p version negotiated");
+			}
+
 		pick m := tm {
 		Readerror =>
-			fail("9P2000 read error: "+m.error);
+			fail("9P read error: "+m.error);
 		Version =>
 			fids = fids.new(31, nil);
-			(v, nil) := str->splitstrl(m.version, ".");
-			if(v != "9P2000")
-				src <-= ref Rmsg.Version(m.tag, m.msize, "unknown");
-			else {
-				src <-= ref Rmsg.Version(m.tag, m.msize, v);
+			rm := ref Rmsg.Version(m.tag, m.msize, "unknown");
+			okversion = 0;
+			if(is9p2000(m.version)) {
+				rm.version = "9P2000";
 				msize = m.msize;
+				okversion = 1;
 			}
+			src <-= rm;
 		Attach =>
 			if(m.afid != styx->NOFID)
 				src <-= ref Rmsg.Error(m.tag, "no auth");
 			else if(fids.find(m.fid) != nil)
 				src <-= ref Rmsg.Error(m.tag, Efidinuse);
 			else {
-				src <-= ref Rmsg.Attach(m.tag, sys->Qid(root.qid, root.mcount, sys->QTDIR));
-				f := ref Fid(0, nil, V.mk(root, top[0], top[1], nil));
+				src <-= ref Rmsg.Attach(m.tag, qid(root.d));
+				f := ref Fid(0, nil, root);
 				fids.add(m.fid, f);
 			}
 		Flush =>
@@ -423,7 +416,7 @@ main(sfd: ref Sys->FD)
 		Walk =>
 			f := fids.find(m.fid);
 			if(f != nil)
-				if(dflag) say(sprint("walk, fid: name %q, score %s", f.v.d.elem, f.v.t.e.score.text()));
+				if(dflag) warn(sprint("walk, fid: name %q, score %s", f.v.d.elem, f.v.t.e.score.text()));
 
 			if(f == nil)
 				src <-= ref Rmsg.Error(m.tag, Ebadfid);
@@ -445,15 +438,17 @@ main(sfd: ref Sys->FD)
 			f := fids.find(m.fid);
 			if(f == nil)
 				src <-= ref Rmsg.Error(m.tag, Ebadfid);
-			else if(m.mode != sys->OREAD)
+			else if(m.mode != styx->OREAD)
 				src <-= ref Rmsg.Error(m.tag, Eperm);
 			else if(f.open)
 				src <-= ref Rmsg.Error(m.tag, Efidopen);
 			else {
 				f.open++;
-				<-f.v.nlock;
-				f.v.nopen++;
-				f.v.nlock <-= 1;
+				if((f.v.d.emode&sys->DMDIR) == 0) {
+					<-f.v.nopenlock;
+					f.v.nopen++;
+					f.v.nopenlock <-= 1;
+				}
 				src <-= ref Rmsg.Open(m.tag, qid(f.v.d), msize-24);
 			}
 		Read =>
@@ -480,10 +475,10 @@ main(sfd: ref Sys->FD)
 			}
 
 			if(f.open && (f.v.d.emode&sys->DMDIR) == 0) {
-				<-f.v.nlock;
+				<-f.v.nopenlock;
 				if(--f.v.nopen == 0)
 					f.v.t.clear();
-				f.v.nlock <-= 1;
+				f.v.nopenlock <-= 1;
 			}
 
 			if(tagof m == tagof Tmsg.Clunk)
@@ -495,7 +490,7 @@ main(sfd: ref Sys->FD)
 			if(f == nil)
 				src <-= ref Rmsg.Error(m.tag, Ebadfid);
 			else
-				src <-= ref Rmsg.Stat(m.tag, stat(f));
+				src <-= ref Rmsg.Stat(m.tag, stat(f.v));
 
 		Auth =>
 			src <-= ref Rmsg.Error(m.tag, "no auth");
@@ -526,6 +521,17 @@ main(sfd: ref Sys->FD)
 	}
 }
 
+is9p2000(s: string): int
+{
+	(v, nil) := str->splitstrl(s, ".");
+	if(str->prefix("9P", v))
+	if(len v == len "9Pnnnn")
+	if(((vers, nil) := str->toint(v[2:], 10)).t1 == nil)
+	if(vers >= 2000)
+		return 1;
+	return 0;
+}
+
 twalk(w: ref W, m: ref Tmsg.Walk, f: ref Fid, rc: chan of ref W)
 {
 	qids := array[len m.names] of sys->Qid;
@@ -550,14 +556,14 @@ twalk(w: ref W, m: ref Tmsg.Walk, f: ref Fid, rc: chan of ref W)
 treaddir(w: ref W, m: ref Tmsg.Read, f: ref Fid, off: big, n: int, rc: chan of ref W)
 {
 	if(f.d == nil || f.d.off == big 0) {
-		lock := chan[1] of int;
-		lock <-= 1;
-		f.d = ref D(lock, big 0, 0, 0, nil, 0, nil);
+		dirlock := chan[1] of int;
+		dirlock <-= 1;
+		f.d = ref D(dirlock, big 0, 0, 0, nil, 0, nil);
 	}
-	<-f.d.lock;
+	<-f.d.dirlock;
 	d: array of byte;
 	(d, w.err) = readdir(f, off, n);
-	f.d.lock <-= 1;
+	f.d.dirlock <-= 1;
 	if(w.err == nil)
 		w.rm = ref Rmsg.Read(m.tag, d);
 	rc <-= w;
@@ -574,13 +580,13 @@ tread(w: ref W, m: ref Tmsg.Read, f: ref Fid, off: big, n: int, rc: chan of ref 
 
 V.mk(d: ref Direntry, e, me: ref Entry, p: ref V): ref V
 {
-	nlock := chan[1] of int;
-	nlock <-= 1;
-	dlock := chan[1] of int;
-	dlock <-= 1;
+	nopenlock := chan[1] of int;
+	nopenlock <-= 1;
+	lookuplock := chan[1] of int;
+	lookuplock <-= 1;
 	if(me != nil)
 		mt := Hashtree.mk(me);
-	return ref V(nlock, 0, d, Hashtree.mk(e), mt, p, dlock, 0, nil);
+	return ref V(nopenlock, 0, d, Hashtree.mk(e), mt, p, lookuplock, 0, nil);
 }
 
 nocache := C(-2, Score(nil), nil);
@@ -596,7 +602,7 @@ Hashtree.mk(e: ref Entry): ref Hashtree
 # if b >= 0, look for that.  otherwise look at s.
 cachelook(t: ref Hashtree, depth, b: int, s: Score): array of byte
 {
-	<-t.lock;
+	<-t.cachelock;
 	(c0, c1) := t.cache[depth];
 	d: array of byte;
 	if(b >= 0 && c0.b == b || b < 0 && c0.s.eq(s))
@@ -605,17 +611,17 @@ cachelook(t: ref Hashtree, depth, b: int, s: Score): array of byte
 		t.cache[depth] = (c1, c0);
 		d = c1.d;
 	}
-	t.lock <-= 1;
+	t.cachelock <-= 1;
 	return d;
 }
 
 cacheput(t: ref Hashtree, depth, b: int, s: Score, d: array of byte)
 {
-	<-t.lock;
+	<-t.cachelock;
 	if(t.cache[depth].t0.b == -2)
 		t.cache[depth].t0 = t.cache[depth].t1;
 	t.cache[depth].t1 = C(b, s, d);
-	t.lock <-= 1;
+	t.cachelock <-= 1;
 }
 
 tvread(t: ref Hashtree, depth, b, ty, sz: int, s: Score): array of byte
@@ -629,7 +635,7 @@ tvread(t: ref Hashtree, depth, b, ty, sz: int, s: Score): array of byte
 
 Hashtree.get(t: self ref Hashtree, b: int): (array of byte, string)
 {
-if(dflag) say(sprint("t.get, b %d", b));
+if(dflag) warn(sprint("t.get, b %d", b));
 	s := t.e.score;
 
 	cd := cachelook(t, t.e.depth, b, Score(nil));
@@ -684,9 +690,9 @@ if(dflag) say(sprint("t.get, b %d", b));
 
 Hashtree.clear(t: self ref Hashtree)
 {
-	<-t.lock;
+	<-t.cachelock;
 	t.cache = array[t.e.depth+1] of {* => (nocache, nocache)};
-	t.lock <-= 1;
+	t.cachelock <-= 1;
 }
 
 vread(s: Score, t, nmax: int): array of byte
@@ -706,7 +712,7 @@ vread(s: Score, t, nmax: int): array of byte
 
 getentry(v: ref V, i: int): (ref Entry, string)
 {
-if(dflag) say(sprint("getentr, i %d", i));
+if(dflag) warn(sprint("getentr, i %d", i));
 	e := v.t.e;
 	if(big (i+1)*big venti->Entrysize > e.size)
 		return (nil, "entry outside file");
@@ -722,7 +728,7 @@ if(dflag) say(sprint("getentr, i %d", i));
 	return (ne, nil);
 }
 
-# called under lock
+# called under lookuplock
 vcacheput(v: ref V, name: string, cv: ref V)
 {
 	for(; v.nc >= Ndcache; v.nc--)
@@ -733,7 +739,7 @@ vcacheput(v: ref V, name: string, cv: ref V)
 
 walk(v: ref V, name: string): (ref V, string)
 {
-	<-v.dlock;
+	<-v.lookuplock;
 
 	nv: ref V;
 	err: string;
@@ -758,7 +764,7 @@ walk(v: ref V, name: string): (ref V, string)
 			vcacheput(v, name, nv);
 	}
 
-	v.dlock <-= 1;
+	v.lookuplock <-= 1;
 
 	if(nv == nil && err == nil)
 		err = Enotfound;
@@ -788,22 +794,25 @@ lwalk(v: ref V, name: string): (ref V, string)
 			de := Direntry.unpack(d[me.offset:me.offset+me.size]);
 			if(de == nil)
 				return (nil, sprint("dir direntry: %r"));
-			if(de.elem == name) {
-				(ne, err0) := getentry(v, de.entry);
-				if(err0 != nil)
-					return (nil, err0);
-				if(de.emode&Sys->DMDIR)
-					(nme, err1) := getentry(v, de.mentry);
-				if(err1 != nil)
-					return (nil, err1);
-				nv := V.mk(de, ne, nme, v);
-				return (nv, nil);
-			}
+
+			if(de.elem != name)
+				continue;
+
+			(ne, err0) := getentry(v, de.entry);
+			if(err0 != nil)
+				return (nil, err0);
+			if(de.emode&Sys->DMDIR)
+				(nme, err1) := getentry(v, de.mentry);
+			if(err1 != nil)
+				return (nil, err1);
+			nv := V.mk(de, ne, nme, v);
+			return (nv, nil);
 		}
 	}
 	return (nil, nil);
 }
 
+# called with f.d.dirlock held
 readdir(f: ref Fid, off: big, n: int): (array of byte, string)
 {
 	d := ref *f.d;
@@ -813,11 +822,11 @@ readdir(f: ref Fid, off: big, n: int): (array of byte, string)
 	h := 0;
 	for(;;) {
 		if(d.mb == nil || d.me >= d.mb.nindex) {
-			if(dflag) say("readdir, next mb");
+			if(dflag) warn("readdir, next mb");
 			# fetch & parse next mb
 			me := f.v.mt.e;
 			if(big d.b >= (me.size+big (me.dsize-1))/big me.dsize) {
-				if(dflag) say("readdir, was last mb");
+				if(dflag) warn("readdir, was last mb");
 				if(dirs == nil)
 					return (array[0] of byte, nil);
 				break;
@@ -832,14 +841,14 @@ readdir(f: ref Fid, off: big, n: int): (array of byte, string)
 			d.b++;
 			d.me = 0;
 		}
-		if(dflag) say("readdir, next me");
+		if(dflag) warn("readdir, next me");
 		me := Metaentry.unpack(d.buf, d.me);
 		if(me == nil)
 			return (nil, sprint("metaentry: %r"));
 		de := Direntry.unpack(d.buf[me.offset:me.offset+me.size]);
 		if(de == nil)
 			return (nil, sprint("direntry: %r"));
-if(dflag) say(sprint("direntry, elem %q, qid %bux, mode %ux, uid gid %q %q, entry %d, mentry %d", de.elem, de.qid, de.emode, de.uid, de.gid, de.entry, de.mentry));
+if(dflag) warn(sprint("direntry, elem %q, qid %bux, mode %ux, uid gid %q %q, entry %d, mentry %d", de.elem, de.qid, de.emode, de.uid, de.gid, de.entry, de.mentry));
 		(ne, err) := getentry(f.v, de.entry);
 		if(err != nil)
 			return (nil, "getentry: "+err);
@@ -915,9 +924,9 @@ dir(d: ref Direntry, size: big): Sys->Dir
 	return sys->Dir(d.elem, d.uid, d.gid, d.mid, qid(d), d.emode, d.atime, d.mtime, size, 0, 0);
 }
 
-stat(f: ref Fid): Sys->Dir
+stat(v: ref V): Sys->Dir
 {
-	return dir(f.v.d, f.v.t.e.size);
+	return dir(v.d, v.t.e.size);
 }
 
 sha1(d: array of byte): array of byte
@@ -955,12 +964,6 @@ progctl(pid: int, s: string)
 killgrp(pid: int)
 {
 	progctl(pid, "killgrp");
-}
-
-say(s: string)
-{
-	if(dflag)
-		warn(s);
 }
 
 fd2: ref Sys->FD;

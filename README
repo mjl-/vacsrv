@@ -39,7 +39,6 @@ mechiel lukkien, reachable at mechiel@ueber.net.
 
 # todo
 
-- check again whether all 9p messages are implemented correctly.
 - implement binary search when walking a name in a dir (metablock/metaentry)
-- handle qidspace
 - review behaviour of cache
+- handle qidspace

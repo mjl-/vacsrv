@@ -697,7 +697,7 @@ vread(s: Score, t, nmax: int): array of byte
 
 getentry(v: ref V, i: int): (ref Entry, string)
 {
-if(dflag) warn(sprint("getentr, i %d", i));
+if(dflag) warn(sprint("getentry, i %d", i));
 	e := v.t.e;
 	if(big (i+1)*big venti->Entrysize > e.size)
 		return (nil, "entry outside file");
@@ -819,10 +819,29 @@ walk(v: ref V, name: string): (ref V, string)
 	return (nv, err);
 }
 
+namecmp(a, b: array of byte, unbotch: int): int
+{
+	n := min(len a, len b);
+	for(i := 0; i < n; i++)
+		if(a[i] != b[i])
+			return int a[i]-int b[i];
+	if(len a == len b)
+		return 0;
+	if(len a < len b)
+		r := 1;
+	else
+		r = -1;
+	if(unbotch)
+		r = -r;
+	return r;
+}
+
+Metablockmagic: con 16r5656fc79;
 lwalk(v: ref V, name: string): (ref V, string)
 {
-	e := v.mt.e;
-	nb := int ((e.size+big (e.dsize-1))/big e.dsize);
+	nm := array of byte name;
+	ee := v.mt.e;
+	nb := int ((ee.size+big (ee.dsize-1))/big ee.dsize);
 	for(i := 0; i < nb; i++) {
 		(d, err) := v.mt.get(i);
 		if(err != nil)
@@ -830,17 +849,38 @@ lwalk(v: ref V, name: string): (ref V, string)
 		mb := Metablock.unpack(d);
 		if(mb == nil)
 			return (nil, sprint("dir metablock: %r"));
-		for(j := 0; j < mb.nindex; j++) {
-			me := Metaentry.unpack(d, j);
+
+		unbotch := g32(d, 0)==(Metablockmagic+1);
+
+		s := 0;
+		e := mb.nindex;
+		while(s < e) {
+			m := (s+e)/2;
+			me := Metaentry.unpack(d, m);
 			if(me == nil)
 				return (nil, sprint("dir metaentry: %r"));
+
+			o := me.offset+6;
+			if(o+2 > len d)
+				return (nil, "short metablock1");
+			n := g16(d, o);
+			o += 2;
+			if(o+n > len d)
+				return (nil, "short metablock2");
+			denm := d[o:o+n];
+			
+			cmp := namecmp(denm, nm, unbotch);
+			if(cmp < 0)
+				s = m+1;
+			if(cmp > 0)
+				e = m;
+			if(cmp != 0)
+				continue;
+
 			de := Direntry.unpack(d[me.offset:me.offset+me.size]);
 			if(de == nil)
 				return (nil, sprint("dir direntry: %r"));
-
-			if(de.elem != name)
-				continue;
-
+				
 			(ne, err0) := getentry(v, de.entry);
 			if(err0 != nil)
 				return (nil, err0);
@@ -985,6 +1025,16 @@ rev[T](l: list of T): list of T
 	for(; l != nil; l = tl l)
 		r = hd l::r;
 	return r;
+}
+
+g16(d: array of byte, o: int): int
+{
+	return int d[o+0]<<8 | int d[o+1]<<0;
+}
+
+g32(d: array of byte, o: int): int
+{
+	return g16(d, o)<<16 | g16(d, o+2)<<0;
 }
 
 min(a, b: int): int

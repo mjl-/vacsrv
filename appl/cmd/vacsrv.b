@@ -739,6 +739,12 @@ vcacheput(v: ref V, name: string, cv: ref V)
 
 walk(v: ref V, name: string): (ref V, string)
 {
+	if(name == "..") {
+		if(v.p != nil)
+			v = v.p;
+		return (v, nil);
+	}
+
 	<-v.lookuplock;
 
 	nv: ref V;
@@ -754,6 +760,7 @@ walk(v: ref V, name: string): (ref V, string)
 			}
 			nv = c.e.v;
 			hit = 1;
+#warn(sprint("walk hit, name %q", name));
 			break;
 		}
 		prev = c;
@@ -762,6 +769,7 @@ walk(v: ref V, name: string): (ref V, string)
 		(nv, err) = lwalk(v, name);
 		if(err == nil)
 			vcacheput(v, name, nv);
+#warn(sprint("walk miss, putting %q, nv nil %d", name, nv==nil));
 	}
 
 	v.lookuplock <-= 1;
@@ -773,11 +781,6 @@ walk(v: ref V, name: string): (ref V, string)
 
 lwalk(v: ref V, name: string): (ref V, string)
 {
-	if(name == "..") {
-		if(v.p != nil)
-			v = v.p;
-		return (v, nil);
-	}
 	e := v.mt.e;
 	nb := int ((e.size+big (e.dsize-1))/big e.dsize);
 	for(i := 0; i < nb; i++) {
